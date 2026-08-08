@@ -694,7 +694,14 @@ void DetectionManager::BackgroundDetectDevices()
     /*-----------------------------------------------------*\
     | Check initial detection delay setting                 |
     \*-----------------------------------------------------*/
-    unsigned int        initial_detection_delay_ms  = JsonUtils::JsonGetInt(detector_settings, "initial_detection_delay_ms");
+    int                 initial_detection_delay_ms  = JsonUtils::JsonGetInt(detector_settings, "initial_detection_delay_ms");
+
+    /* A negative value is invalid for an unsigned sleep duration. Treat it
+       as no delay instead of converting it into a multi-week sleep. */
+    if(initial_detection_delay_ms < 0)
+    {
+        initial_detection_delay_ms = 0;
+    }
 
     /*-----------------------------------------------------*\
     | If configured, delay detection for the configured     |

@@ -14,6 +14,115 @@
 #include "ResourceManager.h"
 #include "SettingsManager.h"
 
+#include <cmath>
+#include <memory>
+#include <mutex>
+#include <unordered_map>
+
+namespace
+{
+struct SoftwareRainbowState
+{
+    std::atomic<bool> running{ false };
+    std::thread       thread;
+};
+
+std::mutex state_mutex;
+std::unordered_map<RGBController_ENESMBus*, std::shared_ptr<SoftwareRainbowState>> rainbow_states;
+std::chrono::steady_clock::time_point rainbow_start;
+bool rainbow_start_valid = false;
+
+std::shared_ptr<SoftwareRainbowState> GetRainbowState(RGBController_ENESMBus* controller)
+{
+    std::lock_guard<std::mutex> lock(state_mutex);
+    return rainbow_states.at(controller);
+}
+
+bool IsSoftwareRainbowRunning(RGBController_ENESMBus* controller)
+{
+    return GetRainbowState(controller)->running.load();
+}
+
+void StartSoftwareRainbow(RGBController_ENESMBus* controller)
+{
+    std::shared_ptr<SoftwareRainbowState> state;
+
+    {
+        std::lock_guard<std::mutex> lock(state_mutex);
+        state = rainbow_states.at(controller);
+
+        bool another_rainbow_running = false;
+        for(const auto& entry : rainbow_states)
+        {
+            if(entry.second->running.load())
+            {
+                another_rainbow_running = true;
+                break;
+            }
+        }
+
+        if(!another_rainbow_running)
+        {
+            rainbow_start = std::chrono::steady_clock::now();
+            rainbow_start_valid = true;
+        }
+
+        state->running = true;
+    }
+
+    if(!state->thread.joinable())
+    {
+        state->thread = std::thread([controller, state]
+        {
+            while(state->running.load())
+            {
+                controller->UpdateLEDs();
+                std::this_thread::sleep_for(std::chrono::milliseconds(33));
+            }
+        });
+    }
+}
+
+void StopSoftwareRainbow(RGBController_ENESMBus* controller)
+{
+    const auto state = GetRainbowState(controller);
+    state->running = false;
+
+    if(state->thread.joinable())
+    {
+        state->thread.join();
+    }
+
+    std::lock_guard<std::mutex> lock(state_mutex);
+    bool another_rainbow_running = false;
+    for(const auto& entry : rainbow_states)
+    {
+        if(entry.second->running.load())
+        {
+            another_rainbow_running = true;
+            break;
+        }
+    }
+
+    if(!another_rainbow_running)
+    {
+        rainbow_start_valid = false;
+    }
+}
+
+double GetSharedRainbowElapsedMilliseconds()
+{
+    std::lock_guard<std::mutex> lock(state_mutex);
+    if(!rainbow_start_valid)
+    {
+        return 0.0;
+    }
+
+    return std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - rainbow_start).count();
+}
+}
+
 /**------------------------------------------------------------------*\
     @name ENE SMBus Device
     @category RAM,Motherboard,GPU,Storage
@@ -28,6 +137,9 @@
 RGBController_ENESMBus::RGBController_ENESMBus(ENESMBusController * controller_ptr)
 {
     controller                  = controller_ptr;
+
+    std::lock_guard<std::mutex> lock(state_mutex);
+    rainbow_states[this] = std::make_shared<SoftwareRainbowState>();
 
     /*---------------------------------------------------------*\
     | Get ENEController settings                                |
@@ -191,7 +303,11 @@ RGBController_ENESMBus::RGBController_ENESMBus(ENESMBusController * controller_p
 
 RGBController_ENESMBus::~RGBController_ENESMBus()
 {
+    StopSoftwareRainbow(this);
     Shutdown();
+
+    std::lock_guard<std::mutex> lock(state_mutex);
+    rainbow_states.erase(this);
 
     delete controller;
 }
@@ -291,7 +407,49 @@ int RGBController_ENESMBus::GetDeviceMode()
 
 void RGBController_ENESMBus::DeviceUpdateLEDs()
 {
-    if(GetActiveMode() == 0)
+    if(IsSoftwareRainbowRunning(this))
+    {
+        const mode& rainbow_mode = modes[active_mode];
+        const unsigned int led_count = static_cast<unsigned int>(leds.size());
+
+        if(led_count > 0)
+        {
+            const double elapsed_ms = GetSharedRainbowElapsedMilliseconds();
+            const double cycle_ms = 3200.0 + (static_cast<double>(rainbow_mode.speed) * 1200.0);
+            const double motion_hue = std::fmod(elapsed_ms / cycle_ms * 360.0, 360.0);
+            const bool reverse = rainbow_mode.direction == MODE_DIRECTION_RIGHT;
+
+            for(unsigned int led_idx = 0; led_idx < led_count; led_idx++)
+            {
+                const double led_hue = static_cast<double>(led_idx) * 360.0 / led_count;
+                double hue = reverse ? motion_hue - led_hue : motion_hue + led_hue;
+
+                while(hue < 0.0) hue += 360.0;
+                while(hue >= 360.0) hue -= 360.0;
+
+                const double sector = hue / 60.0;
+                const unsigned int sector_idx = static_cast<unsigned int>(sector);
+                const unsigned char rising = static_cast<unsigned char>((sector - sector_idx) * 255.0);
+                const unsigned char falling = static_cast<unsigned char>(255 - rising);
+
+                unsigned char red = 0, green = 0, blue = 0;
+                switch(sector_idx)
+                {
+                    case 0: red = 255; green = rising; break;
+                    case 1: red = falling; green = 255; break;
+                    case 2: green = 255; blue = rising; break;
+                    case 3: green = falling; blue = 255; break;
+                    case 4: red = rising; blue = 255; break;
+                    default: red = 255; blue = falling; break;
+                }
+
+                colors[led_idx] = ToRGBColor(red, green, blue);
+            }
+        }
+
+        controller->SetAllColorsDirect(&colors[0]);
+    }
+    else if(GetActiveMode() == 0)
     {
         controller->SetAllColorsDirect(&colors[0]);
     }
@@ -447,6 +605,17 @@ void RGBController_ENESMBus::SetupZones()
 
 void RGBController_ENESMBus::DeviceUpdateMode()
 {
+    if(modes[active_mode].value == ENE_MODE_RAINBOW)
+    {
+        StartSoftwareRainbow(this);
+
+        /* Disable the DIMM's autonomous effect timer. */
+        controller->SetDirect(true);
+        return;
+    }
+
+    StopSoftwareRainbow(this);
+
     if (modes[active_mode].value == 0xFFFF)
     {
         controller->SetDirect(true);
