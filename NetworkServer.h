@@ -228,8 +228,8 @@ private:
     ProfileManagerInterface*            profile_manager;
     SettingsManagerInterface*           settings_manager;
 
-    unsigned int                        profile_about_to_load_acks;
-    unsigned int                        profile_about_to_load_count;
+    std::atomic<unsigned int>           profile_about_to_load_acks;
+    std::atomic<unsigned int>           profile_about_to_load_count;
 private:
 #ifdef WIN32
     /*-----------------------------------------------------*\

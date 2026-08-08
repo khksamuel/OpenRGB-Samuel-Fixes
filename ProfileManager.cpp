@@ -1097,14 +1097,24 @@ void ProfileManager::SignalProfileManagerUpdate(unsigned int update_reason)
         server->SignalProfileManagerUpdate(update_reason);
     }
 
+    /*
+     * Do not call user/plugin callbacks while holding the callback mutex.
+     * A callback may unregister itself (or register another callback), which
+     * otherwise deadlocks the profile-loading thread.  Taking a snapshot also
+     * keeps the iteration stable if a callback changes the registration list.
+     */
+    std::vector<ProfileManagerCallback> callbacks;
+    std::vector<void *> callback_args;
+
     ProfileManagerCallbackMutex.lock();
-
-    for(std::size_t callback_idx = 0; callback_idx < ProfileManagerCallbacks.size(); callback_idx++)
-    {
-        ProfileManagerCallbacks[callback_idx](ProfileManagerCallbackArgs[callback_idx], update_reason);
-    }
-
+    callbacks = ProfileManagerCallbacks;
+    callback_args = ProfileManagerCallbackArgs;
     ProfileManagerCallbackMutex.unlock();
+
+    for(std::size_t callback_idx = 0; callback_idx < callbacks.size(); callback_idx++)
+    {
+        callbacks[callback_idx](callback_args[callback_idx], update_reason);
+    }
 
     LOG_TRACE("[%s] ProfileManager update signalled: %d", PROFILEMANAGER, update_reason);
 }
@@ -1457,6 +1467,24 @@ bool ProfileManager::LoadProfileWithOptions
     bool            load_state
     )
 {
+    /*-------------------------------------------------*
+    | Read and validate the profile before changing    |
+    | the currently active profile                     |
+    \*-------------------------------------------------*/
+    nlohmann::json profile_json = ReadProfileJSON(profile_name);
+
+    if(!profile_json.is_object())
+    {
+        LOG_ERROR("[%s] Unable to load profile '%s': invalid JSON object", PROFILEMANAGER, profile_name.c_str());
+        return(false);
+    }
+
+    if(profile_json.contains("controllers") && !profile_json["controllers"].is_array())
+    {
+        LOG_ERROR("[%s] Unable to load profile '%s': controllers is not an array", PROFILEMANAGER, profile_name.c_str());
+        return(false);
+    }
+
     /*-------------------------------------------------*\
     | Clear stored active profile data                  |
     \*-------------------------------------------------*/
@@ -1470,11 +1498,6 @@ bool ProfileManager::LoadProfileWithOptions
     {
         delete active_rgb_controllers_copy[controller_idx];
     }
-
-    /*-------------------------------------------------*\
-    | Get JSON data for given profile name              |
-    \*-------------------------------------------------*/
-    nlohmann::json profile_json = ReadProfileJSON(profile_name);
 
     /*-------------------------------------------------*\
     | Load the controller state data for this profile   |
