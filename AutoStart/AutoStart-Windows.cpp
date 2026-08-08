@@ -100,6 +100,23 @@ bool AutoStart::EnableAutoStart(AutoStartInfo autostart_info)
             shellLink->SetDescription(descriptionw.c_str());
             shellLink->SetIconLocation(iconw.c_str(), 0);
 
+            /*-------------------------------------------------*
+            | Request elevation for the startup shortcut.      |
+            | This is required for PawnIO/SMBus access on       |
+            | Windows, which is used to detect DRAM modules.   |
+            \*-------------------------------------------------*/
+            IShellLinkDataList* shellLinkDataList = NULL;
+            if(SUCCEEDED(shellLink->QueryInterface(IID_IShellLinkDataList, (void**)&shellLinkDataList)))
+            {
+                DWORD shellLinkFlags = 0;
+                if(SUCCEEDED(shellLinkDataList->GetFlags(&shellLinkFlags)))
+                {
+                    shellLinkDataList->SetFlags(shellLinkFlags | SLDF_RUNAS_USER);
+                }
+
+                shellLinkDataList->Release();
+            }
+
             IPersistFile* persistFile;
 
             result                                  = shellLink->QueryInterface(IID_IPersistFile, (void**)&persistFile);
