@@ -1193,7 +1193,10 @@ bool ProfileManager::LoadAutoProfile(std::string setting_name)
     \*-----------------------------------------------------*/
     if(!profile_name.empty())
     {
-        return(LoadProfile(profile_name));
+        LOG_INFO("[%s] Loading automatic profile '%s'", PROFILEMANAGER, profile_name.c_str());
+        bool loaded = LoadProfile(profile_name);
+        LOG_INFO("[%s] Automatic profile '%s' %s", PROFILEMANAGER, profile_name.c_str(), loaded ? "loaded" : "failed to load");
+        return(loaded);
     }
     else
     {

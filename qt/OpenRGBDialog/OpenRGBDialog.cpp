@@ -33,6 +33,7 @@
 #include <QTabBar>
 #include <QMessageBox>
 #include <QCloseEvent>
+#include <QTimer>
 #include <QStyleFactory>
 #include <QKeyEvent>
 #include <QCheckBox>
@@ -1634,9 +1635,15 @@ void OpenRGBDialog::onDetectionEnded()
     }
 
     /*-----------------------------------------------------*\
-    | Load the on open automatic profile                    |
+    | Load the on open automatic profile after device        |
+    | registration has settled. This helps elevated Windows  |
+    | startup, where GPU and SMBus devices may finish       |
+    | registering just after detection completes.           |
     \*-----------------------------------------------------*/
-    ResourceManager::get()->GetProfileManager()->LoadAutoProfileOpen();
+    QTimer::singleShot(1500, this, [this]
+    {
+        ResourceManager::get()->GetProfileManager()->LoadAutoProfileOpen();
+    });
 }
 
 void OpenRGBDialog::onSettingsUpdated()
