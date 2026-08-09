@@ -5,7 +5,7 @@
 This fork contains fixes for a personal OpenRGB setup:
 
 * **Profile loading freeze/close:** Loading a profile applied the RGB changes but could leave the application unresponsive or make it close. Profile callbacks are now invoked outside the callback lock, and profile data is validated before the active profile is cleared.
-* **G.Skill/ENE RAM Rainbow desynchronization:** The two DIMMs used independent hardware animation clocks, so one stick slowly ran ahead of the other. Rainbow now uses software-generated frames with a shared clock and matching five-segment wave pattern.
+* **G.Skill/ENE RAM Rainbow desynchronization:** The two DIMMs used independent hardware animation clocks, so one stick slowly ran ahead of the other. Rainbow now keeps G.SKILL's native ENE factory wave effect and periodically re-arms both controllers, preventing the sticks from drifting apart while preserving the original pattern.
 * **Startup and RAM detection:** Windows startup now requests elevation for PawnIO/SMBus access. Invalid negative detection delays are treated as zero instead of blocking device scanning indefinitely.
 
 ![Pipeline Status](https://gitlab.com/CalcProgrammer1/OpenRGB/badges/master/pipeline.svg)
