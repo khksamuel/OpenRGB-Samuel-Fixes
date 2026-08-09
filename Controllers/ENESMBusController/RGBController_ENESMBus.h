@@ -29,8 +29,6 @@ public:
     void        DeviceUpdateMode();
     void        DeviceSaveMode();
 
-    void        ReapplyNativeRainbow(int speed, int direction);
-
 private:
     ENESMBusController* controller;
 
