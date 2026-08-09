@@ -14,6 +14,7 @@
 #include "ResourceManager.h"
 #include "SettingsManager.h"
 
+#include <cmath>
 #include <memory>
 #include <mutex>
 #include <unordered_map>
@@ -32,6 +33,8 @@ std::mutex state_mutex;
 std::unordered_map<RGBController_ENESMBus*, std::shared_ptr<SoftwareRainbowState>> rainbow_states;
 std::chrono::steady_clock::time_point rainbow_start;
 bool rainbow_start_valid = false;
+
+std::chrono::milliseconds GetTimeToNextRainbowResync();
 
 std::shared_ptr<SoftwareRainbowState> GetRainbowState(RGBController_ENESMBus* controller)
 {
@@ -86,7 +89,7 @@ void StartSoftwareRainbow(RGBController_ENESMBus* controller, int speed, int dir
                  * its color curve untouched.
                  */
                 controller->ReapplyNativeRainbow(state->speed, state->direction);
-                std::this_thread::sleep_for(std::chrono::seconds(5));
+                std::this_thread::sleep_for(GetTimeToNextRainbowResync());
             }
         });
     }
@@ -129,6 +132,14 @@ double GetSharedRainbowElapsedMilliseconds()
 
     return std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - rainbow_start).count();
+}
+
+std::chrono::milliseconds GetTimeToNextRainbowResync()
+{
+    constexpr double resync_period_ms = 5000.0;
+    const double elapsed_ms = GetSharedRainbowElapsedMilliseconds();
+    const double remainder_ms = std::fmod(elapsed_ms, resync_period_ms);
+    return std::chrono::milliseconds(static_cast<long long>(resync_period_ms - remainder_ms));
 }
 }
 
