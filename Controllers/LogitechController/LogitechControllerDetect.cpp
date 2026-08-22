@@ -50,7 +50,7 @@ using namespace std::chrono_literals;
 | Logitech vendor ID                                        |
 \*---------------------------------------------------------*/
 #define LOGITECH_VID                                0x046D
-#define LOGITECH_LIGHTSPEED_DETECT_MAX_RETRY        10
+#define LOGITECH_LIGHTSPEED_DETECT_MAX_RETRY        2
 
 /*---------------------------------------------------------*\
 | Keyboard product IDs                                      |

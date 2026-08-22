@@ -10,10 +10,100 @@
 #include <fstream>
 #include <iostream>
 #include <shlobj.h>
+#include <vector>
 #include "AutoStart-Windows.h"
 #include "LogManager.h"
 #include "filesystem.h"
 #include "windows.h"
+
+namespace
+{
+bool RunHiddenProcess(const std::wstring& executable, const std::wstring& arguments)
+{
+    std::wstring command_line = L"\"" + executable + L"\" " + arguments;
+    std::vector<wchar_t> command_buffer(command_line.begin(), command_line.end());
+    command_buffer.push_back(L'\0');
+
+    STARTUPINFOW startup_info = {};
+    startup_info.cb = sizeof(startup_info);
+    PROCESS_INFORMATION process_info = {};
+
+    if(!CreateProcessW(executable.c_str(), command_buffer.data(), nullptr, nullptr, FALSE,
+                       CREATE_NO_WINDOW, nullptr, nullptr, &startup_info, &process_info))
+    {
+        return false;
+    }
+
+    const DWORD wait_result = WaitForSingleObject(process_info.hProcess, 10000);
+    DWORD exit_code = ERROR_GEN_FAILURE;
+    if(wait_result == WAIT_OBJECT_0)
+    {
+        GetExitCodeProcess(process_info.hProcess, &exit_code);
+    }
+
+    CloseHandle(process_info.hThread);
+    CloseHandle(process_info.hProcess);
+    return wait_result == WAIT_OBJECT_0 && exit_code == ERROR_SUCCESS;
+}
+
+bool RunScheduledTaskCommand(const std::wstring& arguments)
+{
+    wchar_t system_path[MAX_PATH] = {};
+    if(GetSystemDirectoryW(system_path, MAX_PATH) == 0)
+    {
+        return false;
+    }
+
+    return RunHiddenProcess(std::wstring(system_path) + L"\\schtasks.exe", arguments);
+}
+
+bool ConfigureScheduledTask(const std::wstring& task_name)
+{
+    wchar_t system_path[MAX_PATH] = {};
+    if(GetSystemDirectoryW(system_path, MAX_PATH) == 0)
+    {
+        return false;
+    }
+
+    std::wstring escaped_task_name;
+    for(const wchar_t character : task_name)
+    {
+        escaped_task_name += character == L'\'' ? L"''" : std::wstring(1, character);
+    }
+
+    const std::wstring powershell = std::wstring(system_path)
+                                  + L"\\WindowsPowerShell\\v1.0\\powershell.exe";
+    const std::wstring command =
+        L"-NoProfile -NonInteractive -WindowStyle Hidden -Command \""
+        L"$task = Get-ScheduledTask -TaskName '" + escaped_task_name + L"'; "
+        L"$task.Settings.ExecutionTimeLimit = 'PT0S'; "
+        L"$task.Settings.DisallowStartIfOnBatteries = $false; "
+        L"$task.Settings.StopIfGoingOnBatteries = $false; "
+        L"$task.Settings.StartWhenAvailable = $true; "
+        L"$task.Settings.MultipleInstances = 'IgnoreNew'; "
+        L"Set-ScheduledTask -InputObject $task | Out-Null\"";
+
+    return RunHiddenProcess(powershell, command);
+}
+
+std::wstring QuoteScheduledTaskArgument(const std::wstring& argument)
+{
+    std::wstring quoted = L"\\\"";
+    for(const wchar_t character : argument)
+    {
+        if(character == L'\"')
+        {
+            quoted += L"\\\\\\\"";
+        }
+        else
+        {
+            quoted += character;
+        }
+    }
+    quoted += L"\\\"";
+    return quoted;
+}
+}
 
 AutoStart::AutoStart(std::string name)
 {
@@ -23,7 +113,10 @@ AutoStart::AutoStart(std::string name)
 bool AutoStart::DisableAutoStart()
 {
     std::error_code autostart_file_remove_errcode;
-    bool success                                    = false;
+    const std::wstring task_name = utf8_decode(autostart_name);
+    const bool task_removed = RunScheduledTaskCommand(
+        L"/Delete /TN \"" + task_name + L"\" /F");
+    bool shortcut_removed = true;
 
     /*-----------------------------------------------------*\
     | Check if the filename is valid                        |
@@ -35,16 +128,16 @@ bool AutoStart::DisableAutoStart()
         \*-------------------------------------------------*/
         if(!filesystem::exists(autostart_file))
         {
-            success = true;
+            shortcut_removed = true;
         }
         /*-------------------------------------------------*\
         | Otherwise, delete the file                        |
         \*-------------------------------------------------*/
         else
         {
-            success = filesystem::remove(autostart_file, autostart_file_remove_errcode);
+            shortcut_removed = filesystem::remove(autostart_file, autostart_file_remove_errcode);
 
-            if(!success)
+            if(!shortcut_removed)
             {
                 LOG_ERROR("[AutoStart] An error occurred removing the auto start file.");
             }
@@ -55,93 +148,36 @@ bool AutoStart::DisableAutoStart()
         LOG_ERROR("[AutoStart] Could not establish correct autostart file path.");
     }
 
-    return(success);
+    /* A missing task also means autostart is disabled. */
+    const bool task_absent = !RunScheduledTaskCommand(
+        L"/Query /TN \"" + task_name + L"\"");
+    return shortcut_removed && (task_removed || task_absent);
 }
 
 bool AutoStart::EnableAutoStart(AutoStartInfo autostart_info)
 {
-    bool success                                    = false;
+    const std::wstring task_name = utf8_decode(autostart_name);
+    const std::wstring executable = utf8_decode(autostart_info.path);
+    const std::wstring arguments = utf8_decode(autostart_info.args);
+    const std::wstring task_command = QuoteScheduledTaskArgument(executable)
+                                    + (arguments.empty() ? L"" : L" " + arguments);
 
-    /*-----------------------------------------------------*\
-    | Check if the filename is valid                        |
-    \*-----------------------------------------------------*/
-    if(autostart_file != "")
+    const bool task_created = RunScheduledTaskCommand(
+        L"/Create /TN \"" + task_name + L"\" /SC ONLOGON /RL HIGHEST /F /TR \""
+        + task_command + L"\"");
+    const bool success = task_created && ConfigureScheduledTask(task_name);
+
+    if(success && !autostart_file.empty() && filesystem::exists(autostart_file))
     {
-        bool            weInitialised               = false;
-        HRESULT         result;
-        IShellLinkW*    shellLink                   = NULL;
-
-        std::wstring    exepathw                    = utf8_decode(autostart_info.path);
-        std::wstring    argumentsw                  = utf8_decode(autostart_info.args);
-        std::wstring    startupfilepathw            = utf8_decode(autostart_file);
-        std::wstring    descriptionw                = utf8_decode(autostart_info.desc);
-        std::wstring    iconw                       = utf8_decode(autostart_info.path);
-
-        result                                      = CoCreateInstance(CLSID_ShellLink, NULL, CLSCTX_ALL, IID_IShellLinkW, (void**)&shellLink);
-
-        /*-------------------------------------------------*\
-        | If not initialized, initialize                    |
-        \*-------------------------------------------------*/
-        if(result == CO_E_NOTINITIALIZED)
+        std::error_code remove_error;
+        if(!filesystem::remove(autostart_file, remove_error))
         {
-            weInitialised                           = true;
-            CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
-            result                                  = CoCreateInstance(CLSID_ShellLink, NULL, CLSCTX_ALL, IID_IShellLinkW, (void**)&shellLink);
-        }
-
-        /*-------------------------------------------------*\
-        | If successfully initialized, save a shortcut      |
-        | from the AutoStart parameters                     |
-        \*-------------------------------------------------*/
-        if(SUCCEEDED(result))
-        {
-            shellLink->SetPath(exepathw.c_str());
-            shellLink->SetArguments(argumentsw.c_str());
-            shellLink->SetDescription(descriptionw.c_str());
-            shellLink->SetIconLocation(iconw.c_str(), 0);
-
-            /*-------------------------------------------------*
-            | Request elevation for the startup shortcut.      |
-            | This is required for PawnIO/SMBus access on       |
-            | Windows, which is used to detect DRAM modules.   |
-            \*-------------------------------------------------*/
-            IShellLinkDataList* shellLinkDataList = NULL;
-            if(SUCCEEDED(shellLink->QueryInterface(IID_IShellLinkDataList, (void**)&shellLinkDataList)))
-            {
-                DWORD shellLinkFlags = 0;
-                if(SUCCEEDED(shellLinkDataList->GetFlags(&shellLinkFlags)))
-                {
-                    shellLinkDataList->SetFlags(shellLinkFlags | SLDF_RUNAS_USER);
-                }
-
-                shellLinkDataList->Release();
-            }
-
-            IPersistFile* persistFile;
-
-            result                                  = shellLink->QueryInterface(IID_IPersistFile, (void**)&persistFile);
-
-            if(SUCCEEDED(result))
-            {
-                result                              = persistFile->Save(startupfilepathw.c_str(), TRUE);
-                success                             = SUCCEEDED(result);
-                persistFile->Release();
-            }
-
-            shellLink->Release();
-        }
-
-        /*-------------------------------------------------*\
-        | Uninitialize when done                            |
-        \*-------------------------------------------------*/
-        if(weInitialised)
-        {
-            CoUninitialize();
+            LOG_WARNING("[AutoStart] Elevated scheduled task created, but the legacy startup shortcut could not be removed.");
         }
     }
-    else
+    else if(!success)
     {
-        LOG_ERROR("[AutoStart] Could not establish correct autostart file path.");
+        LOG_ERROR("[AutoStart] Could not create the elevated Windows logon task.");
     }
 
     return success;
@@ -149,17 +185,8 @@ bool AutoStart::EnableAutoStart(AutoStartInfo autostart_info)
 
 bool AutoStart::IsAutoStartEnabled()
 {
-    /*-----------------------------------------------------*\
-    | Check if the filename is valid                        |
-    \*-----------------------------------------------------*/
-    if(autostart_file != "")
-    {
-        return(filesystem::exists(autostart_file));
-    }
-    else
-    {
-        return(false);
-    }
+    return RunScheduledTaskCommand(
+        L"/Query /TN \"" + utf8_decode(autostart_name) + L"\"");
 }
 
 std::string AutoStart::GetExePath()

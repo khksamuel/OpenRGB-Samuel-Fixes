@@ -248,8 +248,16 @@ bool logitech_device::connected()
             get_connected_devices.feature_command = 0x02;    //0x02 Connection State register. Essentially asking for count of paired devices
 
             hid_write(dev_use1, get_connected_devices.buffer, get_connected_devices.size());
-            //This hid_read will not timeout as we need to be sure the wireless device is connected
-            hid_read(dev_use1, get_connected_devices.buffer, get_connected_devices.size());
+            const int read_result = hid_read_timeout(dev_use1,
+                                                     get_connected_devices.buffer,
+                                                     get_connected_devices.size(),
+                                                     LOGITECH_PROTOCOL_TIMEOUT);
+            if(read_result <= 0)
+            {
+                LOG_WARNING("Wireless device index %i did not answer the connection probe", device_index);
+                return false;
+            }
+
             test = (get_connected_devices.data[1] != 0x09);  //ERR_RESOURCE_ERROR i.e. not currently connected
             LOG_DEBUG("Wireless device index %i is %s - %02X %02X %02X", get_connected_devices.device_index,
                       (test ? "connected" : "disconnected"), get_connected_devices.data[0], get_connected_devices.data[1],  get_connected_devices.data[2]);
@@ -296,13 +304,18 @@ void logitech_device::flushReadQueue()
         int flushed     = 0;
         int result      = 1;
 
-        while( result > 0 )
+        constexpr int max_flush_packets = 64;
+        while(result > 0 && flushed < max_flush_packets)
         {
             result = hid_read_timeout(dev->second, response.buffer, response.size(), LOGITECH_PROTOCOL_TIMEOUT);
             if (result > 0)
             {
                 flushed++;
             }
+        }
+        if(flushed == max_flush_packets)
+        {
+            LOG_WARNING("Stopped draining Logitech usage %i after %i packets", dev->first, max_flush_packets);
         }
         //device_name has not yet been set so can not use it in the log
         LOG_DEBUG("Preparing read queue for device %i - flushed %i packet%s", dev->first, flushed, ((flushed == 1) ? "" : "s"));
